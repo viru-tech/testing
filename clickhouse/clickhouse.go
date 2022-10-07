@@ -95,6 +95,7 @@ func NewCHCluster(ctx context.Context, config *CHClusterConfig) (CHCluster, erro
 			ExposedPorts: []string{"9000", "8123"},
 			Mounts:       binds,
 			WaitingFor:   wait.ForListeningPort("9000"),
+			Hostname:     "clickhouse",
 		},
 		Started:      true,
 		ProviderType: testcontainers.ProviderDocker,
@@ -136,7 +137,7 @@ func (c CHCluster) TearDown(ctx context.Context) {
 // DSN returns a connection string that can be used to connect to CH in the cluster.
 // Returned dsn format is "clickhouse://host:port/dbName?x-multi-statement=true".
 func (c CHCluster) DSN(dbName string) string {
-	return fmt.Sprintf("%s?database=%s&x-multi-statement=true", c.chEndpoint, dbName)
+	return fmt.Sprintf("%s/%s?x-multi-statement=true", c.chEndpoint, dbName)
 }
 
 func (c CHCluster) applyMigrations(ctx context.Context, migration CHMigration) error {
@@ -232,7 +233,7 @@ func cpMigrations(from, to string, replacements map[string]string) error {
 			return fmt.Errorf("failed to read %s: %w", from, err)
 		}
 
-		tgtFile, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0x600) //nolint:gosec
+		tgtFile, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec
 		if err != nil {
 			return fmt.Errorf("failed to create %s: %w", to, err)
 		}
