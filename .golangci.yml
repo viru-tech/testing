@@ -1,0 +1,143 @@
+run:
+  go: "1.17"
+  concurrency: 4
+  deadline: 5m
+  issues-exit-code: 1
+  tests: true
+  build-tags:
+    - integration
+  skip-dirs:
+    - vendor
+  modules-download-mode: vendor
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+  govet:
+    check-shadowing: true
+    enable-all: true
+  gofmt:
+    simplify: true
+  gci:
+    sections:
+      - standard
+      - default
+      - prefix(github.com/viru-tech)
+  gocyclo:
+    min-complexity: 20
+  cyclop:
+    max-complexity: 20
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  depguard:
+    list-type: blacklist
+    include-go-root: false
+  misspell:
+    locale: US
+  lll:
+    line-length: 150
+    tab-width: 4
+  unused:
+    check-exported: false
+  unparam:
+    check-exported: true
+  nakedret:
+    max-func-lines: 1
+  prealloc:
+    simple: true
+    range-loops: true
+    for-loops: false
+  gocritic:
+    enabled-tags:
+      - performance
+      - diagnostic
+    settings:
+      captLocal:
+        paramsOnly: true
+      rangeValCopy:
+        sizeThreshold: 32
+  tagliatelle:
+    case:
+      use-field-name: true
+      rules:
+        json: snake
+  revive:
+    ignore-generated-header: true
+    rules:
+      - name: exported
+        disabled: false
+        arguments:
+          - "sayRepetitiveInsteadOfStutters"
+
+linters:
+  enable-all: true
+  fast: false
+  disable:
+    - deadcode
+    - exhaustive
+    - exhaustivestruct
+    - exhaustruct
+    - forbidigo
+    - funlen
+    - godox
+    - goimports
+    - golint
+    - gomnd
+    - gomoddirectives
+    - ifshort
+    - interfacer
+    - maligned
+    - nlreturn
+    - nosnakecase
+    - scopelint
+    - structcheck
+    - testpackage
+    - varcheck
+    - varnamelen
+    - wrapcheck
+    - wsl
+
+issues:
+  exclude:
+    - ST1000 # disable package comments check
+  exclude-rules:
+    - linters:
+        - dupl
+        - gochecknoglobals
+        - goerr113
+        - gosec
+        - maintidx
+      path: _test.go
+
+    - linters:
+        - govet
+      text: "fieldalignment"
+      path: _test.go
+
+    - linters:
+        - govet
+      text: "declaration of \"err\" shadows declaration"
+
+    - linters:
+        - lll
+      source: "^//( )?go:generate "
+
+    - linters: # see https://github.com/kunwardeep/paralleltest/issues/8
+        - paralleltest
+      text: "Range statement for test .*? does not use range value in test Run"
+
+    - linters:
+        - gochecknoglobals
+        - gochecknoinits
+      path: internal/metrics/.*
+
+  exclude-use-default: false
+  max-per-linter: 0
+  max-same-issues: 0
+  new: false
