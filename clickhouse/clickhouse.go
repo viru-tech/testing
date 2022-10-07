@@ -135,9 +135,9 @@ func (c CHCluster) TearDown(ctx context.Context) {
 }
 
 // DSN returns a connection string that can be used to connect to CH in the cluster.
-// Returned dsn format is "clickhouse://host:port/dbName?x-multi-statement=true".
+// Returned dsn is "clickhouse://host:port/dbName".
 func (c CHCluster) DSN(dbName string) string {
-	return fmt.Sprintf("%s/%s?x-multi-statement=true", c.chEndpoint, dbName)
+	return fmt.Sprintf("%s/%s", c.chEndpoint, dbName)
 }
 
 func (c CHCluster) applyMigrations(ctx context.Context, migration CHMigration) error {
@@ -162,7 +162,7 @@ func (c CHCluster) applyMigrations(ctx context.Context, migration CHMigration) e
 
 	m, err := migrate.New(
 		fmt.Sprintf("file://%s", migrations),
-		strings.Replace(c.DSN(migration.DBName), "tcp", "clickhouse", 1),
+		c.DSN(migration.DBName)+"?x-multi-statement=true",
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create CH migrator: %w", err)
