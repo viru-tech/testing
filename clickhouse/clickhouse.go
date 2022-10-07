@@ -91,7 +91,7 @@ func NewCHCluster(ctx context.Context, config *CHClusterConfig) (CHCluster, erro
 
 	cluster.ch, err = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "yandex/clickhouse-server:" + config.Version,
+			Image:        "clickhouse/clickhouse-server:" + config.Version,
 			ExposedPorts: []string{"9000", "8123"},
 			Mounts:       binds,
 			WaitingFor:   wait.ForListeningPort("9000"),
