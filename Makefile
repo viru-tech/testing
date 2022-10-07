@@ -4,7 +4,7 @@ V := @
 OUT_DIR = ./bin
 
 .PHONY: build
-build: clean
+build:
 	@echo BUILDING clickhouse
 	$(V)go build -o ${OUT_DIR}/clickhouse ./clickhouse
 	@echo DONE
