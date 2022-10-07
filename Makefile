@@ -1,15 +1,12 @@
 # suppress output, run `make XXX V=` to be verbose
 V := @
 
-# Build
 OUT_DIR = ./bin
-LD_FLAGS = -ldflags "-s -v -w"
-BUILD_CMD = CGO_ENABLED=1 go build -o ${OUT_DIR}/${NAME} ${LD_FLAGS}
 
 .PHONY: build
 build: clean
 	@echo BUILDING clickhouse
-	$(V)${BUILD_CMD} clickhouse
+	$(V)go build -o ${OUT_DIR}/clickhouse ./clickhouse
 	@echo DONE
 
 .PHONY: lint

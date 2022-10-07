@@ -48,10 +48,10 @@ type CHClusterConfig struct {
 
 // CHMigration is used to migrate CH.
 type CHMigration struct {
-	// Path to migrations directory on host.
-	Path         string
-	DBName       string
 	Replacements map[string]string
+	// Path to migrations directory on host.
+	Path   string
+	DBName string
 }
 
 // CHData is used to import some test data into CHCluster.
@@ -232,7 +232,7 @@ func cpMigrations(from, to string, replacements map[string]string) error {
 			return fmt.Errorf("failed to read %s: %w", from, err)
 		}
 
-		tgtFile, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600) //nolint:gosec
+		tgtFile, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0x600) //nolint:gosec
 		if err != nil {
 			return fmt.Errorf("failed to create %s: %w", to, err)
 		}
