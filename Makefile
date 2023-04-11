@@ -21,7 +21,7 @@ clean:
 
 .PHONY: vendor
 vendor:
-	$(V)GOPRIVATE=${VCS}/* go mod tidy -compat=1.19
+	$(V)GOPRIVATE=${VCS}/* go mod tidy -compat=1.20
 	$(V)GOPRIVATE=${VCS}/* go mod vendor
 	$(V)git add vendor go.mod go.sum
 
