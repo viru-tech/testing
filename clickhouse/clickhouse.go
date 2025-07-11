@@ -167,7 +167,7 @@ func (c CHCluster) applyMigrations(ctx context.Context, migration CHMigration) e
 	}
 
 	m, err := migrate.New(
-		"file://%s"+migrations,
+		"file://"+migrations,
 		c.DSN(migration.DBName)+"?x-multi-statement=true",
 	)
 	if err != nil {
