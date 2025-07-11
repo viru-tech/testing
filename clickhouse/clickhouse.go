@@ -150,7 +150,7 @@ func (c CHCluster) applyMigrations(ctx context.Context, migration CHMigration) e
 	cmd := exec.CommandContext(ctx, //nolint:gosec
 		"docker", "exec", "-i", c.ch.GetContainerID(),
 		"clickhouse", "client",
-		"--query", fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", migration.DBName))
+		"--query", "CREATE DATABASE IF NOT EXISTS "+migration.DBName)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to run %q: %w", cmd.Args, err)
@@ -167,7 +167,7 @@ func (c CHCluster) applyMigrations(ctx context.Context, migration CHMigration) e
 	}
 
 	m, err := migrate.New(
-		fmt.Sprintf("file://%s", migrations),
+		"file://%s"+migrations,
 		c.DSN(migration.DBName)+"?x-multi-statement=true",
 	)
 	if err != nil {
@@ -195,7 +195,7 @@ func (c CHCluster) fill(ctx context.Context, data []CHData) error {
 		if err != nil {
 			return fmt.Errorf("failed to open %s: %w", tsvPath, err)
 		}
-		defer tsv.Close() //nolint:errcheck,gosec
+		defer tsv.Close() //nolint:errcheck
 
 		cmd := exec.CommandContext(ctx, //nolint:gosec
 			"docker", "exec", "-i", c.ch.GetContainerID(),
@@ -243,7 +243,7 @@ func cpMigrations(from, to string, replacements map[string]string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create %s: %w", to, err)
 		}
-		defer tgtFile.Close() //nolint:errcheck,gosec
+		defer tgtFile.Close() //nolint:errcheck
 
 		if _, err := r.WriteString(tgtFile, string(src)); err != nil {
 			return fmt.Errorf("failed to write %s: %w", from, err)
