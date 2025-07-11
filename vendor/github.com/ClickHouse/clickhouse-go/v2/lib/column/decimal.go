@@ -19,6 +19,7 @@ package column
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -93,7 +94,7 @@ func (col *Decimal) Rows() int {
 	return col.col.Rows()
 }
 
-func (col *Decimal) Row(i int, ptr bool) interface{} {
+func (col *Decimal) Row(i int, ptr bool) any {
 	value := col.row(i)
 	if ptr {
 		return value
@@ -130,7 +131,7 @@ func (col *Decimal) row(i int) *decimal.Decimal {
 	return &value
 }
 
-func (col *Decimal) ScanRow(dest interface{}, row int) error {
+func (col *Decimal) ScanRow(dest any, row int) error {
 	switch d := dest.(type) {
 	case *decimal.Decimal:
 		*d = *col.row(row)
@@ -150,7 +151,7 @@ func (col *Decimal) ScanRow(dest interface{}, row int) error {
 	return nil
 }
 
-func (col *Decimal) Append(v interface{}) (nulls []uint8, err error) {
+func (col *Decimal) Append(v any) (nulls []uint8, err error) {
 	switch v := v.(type) {
 	case []decimal.Decimal:
 		nulls = make([]uint8, len(v))
@@ -169,7 +170,45 @@ func (col *Decimal) Append(v interface{}) (nulls []uint8, err error) {
 				col.append(&value)
 			}
 		}
+	case []string:
+		nulls = make([]uint8, len(v))
+		for i := range v {
+			d, err := decimal.NewFromString(v[i])
+			if err != nil {
+				return nil, fmt.Errorf("could not convert \"%v\" to decimal: %w", v[i], err)
+			}
+			col.append(&d)
+		}
+	case []*string:
+		nulls = make([]uint8, len(v))
+		for i := range v {
+			if v[i] == nil {
+				nulls[i] = 1
+				value := decimal.New(0, 0)
+				col.append(&value)
+
+				continue
+			}
+
+			d, err := decimal.NewFromString(*v[i])
+			if err != nil {
+				return nil, fmt.Errorf("could not convert \"%v\" to decimal: %w", *v[i], err)
+			}
+			col.append(&d)
+		}
 	default:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return nil, &ColumnConverterError{
+					Op:   "Append",
+					To:   string(col.chType),
+					From: fmt.Sprintf("%T", v),
+					Hint: "could not get driver.Valuer value",
+				}
+			}
+			return col.Append(val)
+		}
 		return nil, &ColumnConverterError{
 			Op:   "Append",
 			To:   string(col.chType),
@@ -179,7 +218,7 @@ func (col *Decimal) Append(v interface{}) (nulls []uint8, err error) {
 	return
 }
 
-func (col *Decimal) AppendRow(v interface{}) error {
+func (col *Decimal) AppendRow(v any) error {
 	value := decimal.New(0, 0)
 	switch v := v.(type) {
 	case decimal.Decimal:
@@ -188,8 +227,34 @@ func (col *Decimal) AppendRow(v interface{}) error {
 		if v != nil {
 			value = *v
 		}
+	case string:
+		d, err := decimal.NewFromString(v)
+		if err != nil {
+			return fmt.Errorf("could not convert \"%v\" to decimal: %w", v, err)
+		}
+		value = d
+	case *string:
+		if v != nil {
+			d, err := decimal.NewFromString(*v)
+			if err != nil {
+				return fmt.Errorf("could not convert \"%v\" to decimal: %w", *v, err)
+			}
+			value = d
+		}
 	case nil:
 	default:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return &ColumnConverterError{
+					Op:   "AppendRow",
+					To:   string(col.chType),
+					From: fmt.Sprintf("%T", v),
+					Hint: "could not get driver.Valuer value",
+				}
+			}
+			return col.AppendRow(val)
+		}
 		return &ColumnConverterError{
 			Op:   "AppendRow",
 			To:   string(col.chType),

@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
+
+	"github.com/testcontainers/testcontainers-go/internal/core"
+	"github.com/testcontainers/testcontainers-go/log"
 )
 
 var (
@@ -17,16 +21,18 @@ type GenericContainerRequest struct {
 	ContainerRequest              // embedded request for provider
 	Started          bool         // whether to auto-start the container
 	ProviderType     ProviderType // which provider to use, Docker if empty
-	Logger           Logging      // provide a container specific Logging - use default global logger if empty
+	Logger           log.Logger   // provide a container specific Logging - use default global logger if empty
 	Reuse            bool         // reuse an existing container if it exists or create a new one. a container name mustn't be empty
 }
 
+// Deprecated: will be removed in the future.
 // GenericNetworkRequest represents parameters to a generic network
 type GenericNetworkRequest struct {
 	NetworkRequest              // embedded request for provider
 	ProviderType   ProviderType // which provider to use, Docker if empty
 }
 
+// Deprecated: use network.New instead
 // GenericNetwork creates a generic network with parameters
 func GenericNetwork(ctx context.Context, req GenericNetworkRequest) (Network, error) {
 	provider, err := req.ProviderType.GetProvider()
@@ -47,14 +53,16 @@ func GenericContainer(ctx context.Context, req GenericContainerRequest) (Contain
 		return nil, ErrReuseEmptyName
 	}
 
-	logging := req.Logger
-	if logging == nil {
-		logging = Logger
+	logger := req.Logger
+	if logger == nil {
+		// Ensure there is always a non-nil logger by default
+		logger = log.Default()
 	}
-	provider, err := req.ProviderType.GetProvider(WithLogger(logging))
+	provider, err := req.ProviderType.GetProvider(WithLogger(logger))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get provider: %w", err)
 	}
+	defer provider.Close()
 
 	var c Container
 	if req.Reuse {
@@ -68,12 +76,21 @@ func GenericContainer(ctx context.Context, req GenericContainerRequest) (Contain
 		c, err = provider.CreateContainer(ctx, req.ContainerRequest)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: failed to create container", err)
+		// At this point `c` might not be nil. Give the caller an opportunity to call Destroy on the container.
+		// TODO: Remove this debugging.
+		if strings.Contains(err.Error(), "toomanyrequests") {
+			// Debugging information for rate limiting.
+			cfg, err := getDockerConfig()
+			if err == nil {
+				fmt.Printf("XXX: too many requests: %+v", cfg)
+			}
+		}
+		return c, fmt.Errorf("create container: %w", err)
 	}
 
 	if req.Started && !c.IsRunning() {
 		if err := c.Start(ctx); err != nil {
-			return c, fmt.Errorf("%w: failed to start container", err)
+			return c, fmt.Errorf("start container: %w", err)
 		}
 	}
 	return c, nil
@@ -83,4 +100,51 @@ func GenericContainer(ctx context.Context, req GenericContainerRequest) (Contain
 type GenericProvider interface {
 	ContainerProvider
 	NetworkProvider
+	ImageProvider
+}
+
+// GenericLabels returns a map of labels that can be used to identify resources
+// created by this library. This includes the standard LabelSessionID if the
+// reaper is enabled, otherwise this is excluded to prevent resources being
+// incorrectly reaped.
+func GenericLabels() map[string]string {
+	return core.DefaultLabels(core.SessionID())
+}
+
+// AddGenericLabels adds the generic labels to target.
+func AddGenericLabels(target map[string]string) {
+	for k, v := range GenericLabels() {
+		target[k] = v
+	}
+}
+
+// Run is a convenience function that creates a new container and starts it.
+// It calls the GenericContainer function and returns a concrete DockerContainer type.
+func Run(ctx context.Context, img string, opts ...ContainerCustomizer) (*DockerContainer, error) {
+	req := ContainerRequest{
+		Image: img,
+	}
+
+	genericContainerReq := GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
+	}
+
+	for _, opt := range opts {
+		if err := opt.Customize(&genericContainerReq); err != nil {
+			return nil, fmt.Errorf("customize: %w", err)
+		}
+	}
+
+	ctr, err := GenericContainer(ctx, genericContainerReq)
+	var c *DockerContainer
+	if ctr != nil {
+		c = ctr.(*DockerContainer)
+	}
+
+	if err != nil {
+		return c, fmt.Errorf("generic container: %w", err)
+	}
+
+	return c, nil
 }

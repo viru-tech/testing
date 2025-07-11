@@ -6,11 +6,21 @@ func (c *ColDate) Append(v time.Time) {
 	*c = append(*c, ToDate(v))
 }
 
+func (c *ColDate) AppendArr(vs []time.Time) {
+	var dates = make([]Date, len(vs))
+
+	for i, v := range vs {
+		dates[i] = ToDate(v)
+	}
+
+	*c = append(*c, dates...)
+}
+
 func (c ColDate) Row(i int) time.Time {
 	return c[i].Time()
 }
 
-// LowCardinality returns LowCardinality for Enum8 .
+// LowCardinality returns LowCardinality for Enum8.
 func (c *ColDate) LowCardinality() *ColLowCardinality[time.Time] {
 	return &ColLowCardinality[time.Time]{
 		index: c,

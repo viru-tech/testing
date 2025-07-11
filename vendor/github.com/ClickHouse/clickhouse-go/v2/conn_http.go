@@ -23,14 +23,17 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
-	"database/sql/driver"
+	sqldriver "database/sql/driver"
+	"errors"
 	"fmt"
-	"github.com/ClickHouse/clickhouse-go/v2/resources"
 	"io"
-	"io/ioutil"
+	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,7 +41,6 @@ import (
 	chproto "github.com/ClickHouse/ch-go/proto"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	"github.com/andybalholm/brotli"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -52,7 +54,7 @@ type Pool[T any] struct {
 
 func NewPool[T any](fn func() T) Pool[T] {
 	return Pool[T]{
-		pool: &sync.Pool{New: func() interface{} { return fn() }},
+		pool: &sync.Pool{New: func() any { return fn() }},
 	}
 }
 
@@ -71,49 +73,32 @@ type HTTPReaderWriter struct {
 	method CompressionMethod
 }
 
-func (rw HTTPReaderWriter) read(res *http.Response) ([]byte, error) {
+// NewReader will return a reader that will decompress data if needed.
+func (rw *HTTPReaderWriter) NewReader(res *http.Response) (io.Reader, error) {
 	enc := res.Header.Get("Content-Encoding")
 	if !res.Uncompressed && rw.method.String() == enc {
 		switch rw.method {
 		case CompressionGZIP:
 			reader := rw.reader.(*gzip.Reader)
-			defer reader.Close()
 			if err := reader.Reset(res.Body); err != nil {
 				return nil, err
 			}
-			body, err := ioutil.ReadAll(reader)
-			if err != nil {
-				return nil, err
-			}
-			return body, nil
+			return reader, nil
 		case CompressionDeflate:
-			reader := rw.reader.(io.ReadCloser)
-			defer reader.Close()
-			if err := rw.reader.(flate.Resetter).Reset(res.Body, nil); err != nil {
+			reader := rw.reader
+			if err := reader.(flate.Resetter).Reset(res.Body, nil); err != nil {
 				return nil, err
 			}
-			body, err := ioutil.ReadAll(reader)
-			if err != nil {
-				return nil, err
-			}
-			return body, nil
+			return reader, nil
 		case CompressionBrotli:
 			reader := rw.reader.(*brotli.Reader)
 			if err := reader.Reset(res.Body); err != nil {
 				return nil, err
 			}
-			body, err := ioutil.ReadAll(reader)
-			if err != nil {
-				return nil, err
-			}
-			return body, nil
+			return reader, nil
 		}
 	}
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
-	}
-	return body, nil
+	return res.Body, nil
 }
 
 func (rw *HTTPReaderWriter) reset(pw *io.PipeWriter) io.WriteCloser {
@@ -132,7 +117,62 @@ func (rw *HTTPReaderWriter) reset(pw *io.PipeWriter) io.WriteCloser {
 	}
 }
 
+// applyOptionsToRequest applies the client Options (such as auth, headers, client info) to the given http.Request
+func applyOptionsToRequest(ctx context.Context, req *http.Request, opt *Options) error {
+	jwt := queryOptionsJWT(ctx)
+	useJWT := jwt != "" || useJWTAuth(opt)
+
+	if opt.TLS != nil && useJWT {
+		if jwt == "" {
+			var err error
+			jwt, err = opt.GetJWT(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to get JWT: %w", err)
+			}
+		}
+
+		req.Header.Set("Authorization", "Bearer "+jwt)
+	} else if opt.TLS != nil && len(opt.Auth.Username) > 0 {
+		req.Header.Set("X-ClickHouse-User", opt.Auth.Username)
+		if len(opt.Auth.Password) > 0 {
+			req.Header.Set("X-ClickHouse-Key", opt.Auth.Password)
+			req.Header.Set("X-ClickHouse-SSL-Certificate-Auth", "off")
+		} else {
+			req.Header.Set("X-ClickHouse-SSL-Certificate-Auth", "on")
+		}
+	} else if opt.TLS == nil && len(opt.Auth.Username) > 0 {
+		if len(opt.Auth.Password) > 0 {
+			req.URL.User = url.UserPassword(opt.Auth.Username, opt.Auth.Password)
+
+		} else {
+			req.URL.User = url.User(opt.Auth.Username)
+		}
+	}
+
+	req.Header.Set("User-Agent", opt.ClientInfo.String())
+
+	for k, v := range opt.HttpHeaders {
+		req.Header.Set(k, v)
+	}
+
+	return nil
+}
+
 func dialHttp(ctx context.Context, addr string, num int, opt *Options) (*httpConnect, error) {
+	debugf := func(format string, v ...any) {}
+	if opt.Debug {
+		if opt.Debugf != nil {
+			debugf = func(format string, v ...any) {
+				opt.Debugf(
+					"[clickhouse-http][%s][id=%d] "+format,
+					append([]interface{}{addr, num}, v...)...,
+				)
+			}
+		} else {
+			debugf = log.New(os.Stdout, fmt.Sprintf("[clickhouse-http][%s][id=%d]", addr, num), 0).Printf
+		}
+	}
+
 	if opt.scheme == "" {
 		switch opt.Protocol {
 		case HTTP:
@@ -149,26 +189,6 @@ func dialHttp(ctx context.Context, addr string, num int, opt *Options) (*httpCon
 		Host:   addr,
 		Path:   opt.HttpUrlPath,
 	}
-
-	headers := make(map[string]string)
-	for k, v := range opt.HttpHeaders {
-		headers[k] = v
-	}
-
-	if opt.TLS == nil && len(opt.Auth.Username) > 0 {
-		if len(opt.Auth.Password) > 0 {
-			u.User = url.UserPassword(opt.Auth.Username, opt.Auth.Password)
-		} else {
-			u.User = url.User(opt.Auth.Username)
-		}
-	} else if opt.TLS != nil && len(opt.Auth.Username) > 0 {
-		headers["X-ClickHouse-User"] = opt.Auth.Username
-		if len(opt.Auth.Password) > 0 {
-			headers["X-ClickHouse-Key"] = opt.Auth.Password
-		}
-	}
-
-	headers["User-Agent"] = opt.ClientInfo.String()
 
 	query := u.Query()
 	if len(opt.Auth.Database) > 0 {
@@ -187,116 +207,153 @@ func dialHttp(ctx context.Context, addr string, num int, opt *Options) (*httpCon
 	}
 
 	for k, v := range opt.Settings {
+		if cv, ok := v.(CustomSetting); ok {
+			v = cv.Value
+		}
+
 		query.Set(k, fmt.Sprint(v))
 	}
 
 	query.Set("default_format", "Native")
+	// TODO: we support newer revisions but for some reason this completely breaks Native format
+	//query.Set("client_protocol_version", strconv.Itoa(ClientTCPProtocolVersion))
 	u.RawQuery = query.Encode()
 
+	httpProxy := http.ProxyFromEnvironment
+	if opt.HTTPProxyURL != nil {
+		httpProxy = http.ProxyURL(opt.HTTPProxyURL)
+	}
+
 	t := &http.Transport{
+		Proxy: httpProxy,
 		DialContext: (&net.Dialer{
-			Timeout:   opt.DialTimeout,
-			KeepAlive: opt.ConnMaxLifetime,
+			Timeout: opt.DialTimeout,
 		}).DialContext,
 		MaxIdleConns:          1,
+		MaxConnsPerHost:       opt.HttpMaxConnsPerHost,
 		IdleConnTimeout:       opt.ConnMaxLifetime,
 		ResponseHeaderTimeout: opt.ReadTimeout,
 		TLSClientConfig:       opt.TLS,
 	}
 
-	conn := &httpConnect{
-		client: &http.Client{
-			Transport: t,
-		},
-		url:             u,
-		buffer:          new(chproto.Buffer),
-		compression:     opt.Compression.Method,
-		blockCompressor: compress.NewWriter(),
-		compressionPool: compressionPool,
-		blockBufferSize: opt.BlockBufferSize,
-		headers:         headers,
-	}
-	location, err := conn.readTimeZone(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if num == 1 {
-		version, err := conn.readVersion(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if !resources.ClientMeta.IsSupportedClickHouseVersion(version) {
-			fmt.Printf("WARNING: version %v of ClickHouse is not supported by this client\n", version)
+	if opt.DialContext != nil {
+		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return opt.DialContext(ctx, addr)
 		}
 	}
 
-	return &httpConnect{
+	conn := httpConnect{
+		id:          num,
+		connectedAt: time.Now(),
+		released:    false,
+		debugfFunc:  debugf,
+		opt:         opt,
 		client: &http.Client{
 			Transport: t,
 		},
-		url:             u,
+		url: u,
+		// TODO: learn more about why revision is broken
+		//revision:        ClientTCPProtocolVersion,
 		buffer:          new(chproto.Buffer),
 		compression:     opt.Compression.Method,
-		blockCompressor: compress.NewWriter(),
+		blockCompressor: compress.NewWriter(compress.Level(opt.Compression.Level), compress.Method(opt.Compression.Method)),
 		compressionPool: compressionPool,
-		location:        location,
 		blockBufferSize: opt.BlockBufferSize,
-		headers:         headers,
-	}, nil
+	}
+
+	handshake, err := conn.queryHello(ctx, func(nativeTransport, error) {})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query server hello: %w", err)
+	}
+	conn.handshake = handshake
+
+	return &conn, nil
 }
 
 type httpConnect struct {
+	id              int
+	connectedAt     time.Time
+	released        bool
+	debugfFunc      func(format string, v ...any)
+	opt             *Options
+	revision        uint64
 	url             *url.URL
 	client          *http.Client
-	location        *time.Location
 	buffer          *chproto.Buffer
 	compression     CompressionMethod
 	blockCompressor *compress.Writer
 	compressionPool Pool[HTTPReaderWriter]
 	blockBufferSize uint8
-	headers         map[string]string
+	handshake       proto.ServerHandshake
+}
+
+func (h *httpConnect) serverVersion() (*ServerVersion, error) {
+	return &h.handshake, nil
+}
+
+func (h *httpConnect) connID() int {
+	return h.id
+}
+
+func (h *httpConnect) connectedAtTime() time.Time {
+	return h.connectedAt
+}
+
+func (h *httpConnect) isReleased() bool {
+	return h.released
+}
+
+func (h *httpConnect) setReleased(released bool) {
+	h.released = released
+}
+
+func (h *httpConnect) debugf(format string, v ...any) {
+	h.debugfFunc(format, v...)
+}
+
+func (h *httpConnect) freeBuffer() {
 }
 
 func (h *httpConnect) isBad() bool {
-	if h.client == nil {
-		return true
-	}
-	return false
+	return h.client == nil
 }
 
-func (h *httpConnect) readTimeZone(ctx context.Context) (*time.Location, error) {
-	rows, err := h.query(ctx, func(*connect, error) {}, "SELECT timezone()")
+func (h *httpConnect) queryHello(ctx context.Context, release nativeTransportRelease) (proto.ServerHandshake, error) {
+	h.debugf("[query hello]")
+	ctx = Context(ctx, ignoreExternalTables())
+	query := "SELECT displayName(), version(), revision(), timezone()"
+	rows, err := h.query(ctx, release, query)
 	if err != nil {
-		return nil, err
+		return proto.ServerHandshake{}, fmt.Errorf("failed to query server hello info: %w", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		return proto.ServerHandshake{}, errors.New("no rows returned for server hello query")
 	}
 
-	for rows.Next() {
-		var serverLocation string
-		rows.Scan(&serverLocation)
-		location, err := time.LoadLocation(serverLocation)
-		if err != nil {
-			return nil, err
-		}
-		return location, nil
+	var (
+		displayName string
+		versionStr  string
+		revision    uint32
+		timezone    string
+	)
+	if err := rows.Scan(&displayName, &versionStr, &revision, &timezone); err != nil {
+		return proto.ServerHandshake{}, err
 	}
-	return nil, errors.New("unable to determine server timezone")
-}
 
-func (h *httpConnect) readVersion(ctx context.Context) (proto.Version, error) {
-	rows, err := h.query(ctx, func(*connect, error) {}, "SELECT version()")
+	location, err := time.LoadLocation(timezone)
 	if err != nil {
-		return proto.Version{}, err
+		return proto.ServerHandshake{}, fmt.Errorf("failed to load timezone from server hello query: %w", err)
 	}
-	for rows.Next() {
-		var v string
-		rows.Scan(&v)
-		version, err := proto.ParseVersion(v)
-		if err != nil {
-			return proto.Version{}, err
-		}
-		return version, nil
-	}
-	return proto.Version{}, errors.New("unable to determine version")
+
+	return proto.ServerHandshake{
+		Name:        displayName,
+		DisplayName: displayName,
+		Revision:    uint64(revision),
+		Version:     proto.ParseVersion(versionStr),
+		Timezone:    location,
+	}, nil
 }
 
 func createCompressionPool(compression *Compression) (Pool[HTTPReaderWriter], error) {
@@ -350,25 +407,24 @@ func createCompressionPool(compression *Compression) (Pool[HTTPReaderWriter], er
 func (h *httpConnect) writeData(block *proto.Block) error {
 	// Saving offset of compressible data
 	start := len(h.buffer.Buf)
-	if err := block.Encode(h.buffer, 0); err != nil {
-		return err
+	if err := block.Encode(h.buffer, h.revision); err != nil {
+		return fmt.Errorf("block encode: %w", err)
 	}
 	if h.compression == CompressionLZ4 || h.compression == CompressionZSTD {
 		// Performing compression. Supported and requires
 		data := h.buffer.Buf[start:]
-		if err := h.blockCompressor.Compress(compress.Method(h.compression), data); err != nil {
-			return errors.Wrap(err, "compress")
+		if err := h.blockCompressor.Compress(data); err != nil {
+			return fmt.Errorf("compress: %w", err)
 		}
 		h.buffer.Buf = append(h.buffer.Buf[:start], h.blockCompressor.Data...)
 	}
 	return nil
 }
 
-func (h *httpConnect) readData(ctx context.Context, reader *chproto.Reader) (*proto.Block, error) {
-	opts := queryOptions(ctx)
-	location := h.location
-	if opts.userLocation != nil {
-		location = opts.userLocation
+func (h *httpConnect) readData(reader *chproto.Reader, timezone *time.Location) (*proto.Block, error) {
+	location := h.handshake.Timezone
+	if timezone != nil {
+		location = timezone
 	}
 
 	block := proto.Block{Timezone: location}
@@ -376,14 +432,14 @@ func (h *httpConnect) readData(ctx context.Context, reader *chproto.Reader) (*pr
 		reader.EnableCompression()
 		defer reader.DisableCompression()
 	}
-	if err := block.Decode(reader, 0); err != nil {
-		return nil, err
+	if err := block.Decode(reader, h.revision); err != nil {
+		return nil, fmt.Errorf("block decode: %w", err)
 	}
 	return &block, nil
 }
 
-func (h *httpConnect) sendQuery(ctx context.Context, r io.Reader, options *QueryOptions, headers map[string]string) (*http.Response, error) {
-	req, err := h.prepareRequest(ctx, r, options, headers)
+func (h *httpConnect) sendStreamQuery(ctx context.Context, r io.Reader, options *QueryOptions, headers map[string]string) (*http.Response, error) {
+	req, err := h.createRequest(ctx, h.url.String(), r, options, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -396,35 +452,47 @@ func (h *httpConnect) sendQuery(ctx context.Context, r io.Reader, options *Query
 	return res, nil
 }
 
+func (h *httpConnect) sendQuery(ctx context.Context, query string, options *QueryOptions, headers map[string]string) (*http.Response, error) {
+	req, err := h.prepareRequest(ctx, query, options, headers)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := h.executeRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
 func (h *httpConnect) readRawResponse(response *http.Response) (body []byte, err error) {
 	rw := h.compressionPool.Get()
-	defer response.Body.Close()
 	defer h.compressionPool.Put(rw)
-	if body, err = rw.read(response); err != nil {
+
+	reader, err := rw.NewReader(response)
+	if err != nil {
 		return nil, err
 	}
 	if h.compression == CompressionLZ4 || h.compression == CompressionZSTD {
-		result := make([]byte, len(body))
-		reader := chproto.NewReader(bytes.NewReader(body))
-		reader.EnableCompression()
-		defer reader.DisableCompression()
-		for {
-			b, err := reader.ReadByte()
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				return nil, err
-			}
-			result = append(result, b)
-		}
-		return result, nil
+		chReader := chproto.NewReader(reader)
+		chReader.EnableCompression()
+		reader = chReader
+	}
+
+	body, err = io.ReadAll(reader)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
 	}
 	return body, nil
 }
 
-func (h *httpConnect) prepareRequest(ctx context.Context, reader io.Reader, options *QueryOptions, headers map[string]string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.url.String(), reader)
+func (h *httpConnect) createRequest(ctx context.Context, requestUrl string, reader io.Reader, options *QueryOptions, headers map[string]string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestUrl, reader)
+	if err != nil {
+		return nil, err
+	}
+
+	err = applyOptionsToRequest(ctx, req, h.opt)
 	if err != nil {
 		return nil, err
 	}
@@ -447,6 +515,9 @@ func (h *httpConnect) prepareRequest(ctx context.Context, reader io.Reader, opti
 			if key == "default_format" {
 				continue
 			}
+			if cv, ok := value.(CustomSetting); ok {
+				value = cv.Value
+			}
 			query.Set(key, fmt.Sprint(value))
 		}
 		for key, value := range options.parameters {
@@ -454,36 +525,83 @@ func (h *httpConnect) prepareRequest(ctx context.Context, reader io.Reader, opti
 		}
 		req.URL.RawQuery = query.Encode()
 	}
-
 	return req, nil
+}
+
+func (h *httpConnect) prepareRequest(ctx context.Context, query string, options *QueryOptions, headers map[string]string) (*http.Request, error) {
+	if options == nil || len(options.external) == 0 {
+		return h.createRequest(ctx, h.url.String(), strings.NewReader(query), options, headers)
+	}
+	return h.createRequestWithExternalTables(ctx, query, options, headers)
+}
+
+func (h *httpConnect) createRequestWithExternalTables(ctx context.Context, query string, options *QueryOptions, headers map[string]string) (*http.Request, error) {
+	payload := &bytes.Buffer{}
+	w := multipart.NewWriter(payload)
+	currentUrl := new(url.URL)
+	*currentUrl = *h.url
+	queryValues := currentUrl.Query()
+	buf := &chproto.Buffer{}
+	for _, table := range options.external {
+		tableName := table.Name()
+		queryValues.Set(fmt.Sprintf("%v_format", tableName), "Native")
+		queryValues.Set(fmt.Sprintf("%v_structure", tableName), table.Structure())
+		partWriter, err := w.CreateFormFile(tableName, "")
+		if err != nil {
+			return nil, err
+		}
+		buf.Reset()
+		err = table.Block().Encode(buf, h.revision)
+		if err != nil {
+			return nil, err
+		}
+		_, err = partWriter.Write(buf.Buf)
+		if err != nil {
+			return nil, err
+		}
+	}
+	currentUrl.RawQuery = queryValues.Encode()
+	err := w.WriteField("query", query)
+	if err != nil {
+		return nil, err
+	}
+	err = w.Close()
+	if err != nil {
+		return nil, err
+	}
+	headers["Content-Type"] = w.FormDataContentType()
+	return h.createRequest(ctx, currentUrl.String(), bytes.NewReader(payload.Bytes()), options, headers)
 }
 
 func (h *httpConnect) executeRequest(req *http.Request) (*http.Response, error) {
 	if h.client == nil {
-		return nil, driver.ErrBadConn
+		return nil, sqldriver.ErrBadConn
 	}
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
+
 	if resp.StatusCode != http.StatusOK {
-
-		msg, err := h.readRawResponse(resp)
-
+		defer discardAndClose(resp.Body)
+		msgBytes, err := h.readRawResponse(resp)
 		if err != nil {
-			return nil, errors.Wrap(err, "clickhouse [execute]:: failed to read the response")
+			return nil, fmt.Errorf("[HTTP %d] failed to read response: %w", resp.StatusCode, err)
 		}
 
-		return nil, fmt.Errorf("clickhouse [execute]:: %d code: %s", resp.StatusCode, string(msg))
+		return nil, fmt.Errorf("[HTTP %d] response body: \"%s\"", resp.StatusCode, string(msgBytes))
 	}
 	return resp, nil
 }
 
 func (h *httpConnect) ping(ctx context.Context) error {
-	rows, err := h.query(ctx, nil, "SELECT 1")
+	ctx = Context(ctx, ignoreExternalTables())
+	// release func is called by connection pool
+	rows, err := h.query(ctx, func(nativeTransport, error) {}, "SELECT 1")
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	column := rows.Columns()
 	// check that we got column 1
 	if len(column) == 1 && column[0] == "1" {
@@ -499,4 +617,11 @@ func (h *httpConnect) close() error {
 	h.client.CloseIdleConnections()
 	h.client = nil
 	return nil
+}
+
+// discardAndClose discards remaining data and closes the reader.
+// Intended for freeing HTTP connections for re-use.
+func discardAndClose(rc io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, rc)
+	_ = rc.Close()
 }

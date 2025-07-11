@@ -2,13 +2,16 @@ package wait
 
 import (
 	"context"
-	"github.com/docker/docker/api/types"
 	"time"
+
+	"github.com/docker/docker/api/types"
 )
 
 // Implement interface
-var _ Strategy = (*HealthStrategy)(nil)
-var _ StrategyTimeout = (*HealthStrategy)(nil)
+var (
+	_ Strategy        = (*HealthStrategy)(nil)
+	_ StrategyTimeout = (*HealthStrategy)(nil)
+)
 
 // HealthStrategy will wait until the container becomes healthy
 type HealthStrategy struct {
@@ -24,7 +27,6 @@ func NewHealthStrategy() *HealthStrategy {
 	return &HealthStrategy{
 		PollInterval: defaultPollInterval(),
 	}
-
 }
 
 // fluent builders for each property
@@ -59,7 +61,7 @@ func (ws *HealthStrategy) Timeout() *time.Duration {
 }
 
 // WaitUntilReady implements Strategy.WaitUntilReady
-func (ws *HealthStrategy) WaitUntilReady(ctx context.Context, target StrategyTarget) (err error) {
+func (ws *HealthStrategy) WaitUntilReady(ctx context.Context, target StrategyTarget) error {
 	timeout := defaultStartupTimeout()
 	if ws.timeout != nil {
 		timeout = *ws.timeout
@@ -75,6 +77,9 @@ func (ws *HealthStrategy) WaitUntilReady(ctx context.Context, target StrategyTar
 		default:
 			state, err := target.State(ctx)
 			if err != nil {
+				return err
+			}
+			if err := checkState(state); err != nil {
 				return err
 			}
 			if state.Health == nil || state.Health.Status != types.Healthy {

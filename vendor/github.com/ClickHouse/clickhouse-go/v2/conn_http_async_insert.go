@@ -19,12 +19,9 @@ package clickhouse
 
 import (
 	"context"
-	"io"
-	"io/ioutil"
-	"strings"
 )
 
-func (h *httpConnect) asyncInsert(ctx context.Context, query string, wait bool) error {
+func (h *httpConnect) asyncInsert(ctx context.Context, query string, wait bool, args ...any) error {
 
 	options := queryOptions(ctx)
 	options.settings["async_insert"] = 1
@@ -32,12 +29,19 @@ func (h *httpConnect) asyncInsert(ctx context.Context, query string, wait bool) 
 	if wait {
 		options.settings["wait_for_async_insert"] = 1
 	}
-	res, err := h.sendQuery(ctx, strings.NewReader(query), &options, h.headers)
-	if res != nil {
-		defer res.Body.Close()
-		// we don't care about result, so just discard it to reuse connection
-		_, _ = io.Copy(ioutil.Discard, res.Body)
+	if len(args) > 0 {
+		var err error
+		query, err = bindQueryOrAppendParameters(true, &options, query, h.handshake.Timezone, args...)
+		if err != nil {
+			return err
+		}
 	}
 
-	return err
+	res, err := h.sendQuery(ctx, query, &options, nil)
+	if err != nil {
+		return err
+	}
+	defer discardAndClose(res.Body)
+
+	return nil
 }

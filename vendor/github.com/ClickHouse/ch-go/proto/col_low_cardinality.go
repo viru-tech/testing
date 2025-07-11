@@ -13,34 +13,6 @@ var (
 	_ Column    = (*ColLowCardinality[string])(nil)
 )
 
-// DecodeState implements StateDecoder, ensuring state for index column.
-func (c *ColLowCardinality[T]) DecodeState(r *Reader) error {
-	keySerialization, err := r.Int64()
-	if err != nil {
-		return errors.Wrap(err, "version")
-	}
-	if keySerialization != int64(sharedDictionariesWithAdditionalKeys) {
-		return errors.Errorf("got version %d, expected %d",
-			keySerialization, sharedDictionariesWithAdditionalKeys,
-		)
-	}
-	if s, ok := c.index.(StateDecoder); ok {
-		if err := s.DecodeState(r); err != nil {
-			return errors.Wrap(err, "index state")
-		}
-	}
-	return nil
-}
-
-// EncodeState implements StateEncoder, ensuring state for index column.
-func (c ColLowCardinality[T]) EncodeState(b *Buffer) {
-	// Writing key serialization version.
-	b.PutInt64(int64(sharedDictionariesWithAdditionalKeys))
-	if s, ok := c.index.(StateEncoder); ok {
-		s.EncodeState(b)
-	}
-}
-
 //go:generate go run github.com/dmarkham/enumer -type CardinalityKey -trimprefix Key -output col_low_cardinality_enum.go
 
 // CardinalityKey is integer type of ColLowCardinality.Keys column.
@@ -117,6 +89,34 @@ type ColLowCardinality[T comparable] struct {
 
 	kv   map[T]int
 	keys []int
+}
+
+// DecodeState implements StateDecoder, ensuring state for index column.
+func (c *ColLowCardinality[T]) DecodeState(r *Reader) error {
+	keySerialization, err := r.Int64()
+	if err != nil {
+		return errors.Wrap(err, "version")
+	}
+	if keySerialization != int64(sharedDictionariesWithAdditionalKeys) {
+		return errors.Errorf("got version %d, expected %d",
+			keySerialization, sharedDictionariesWithAdditionalKeys,
+		)
+	}
+	if s, ok := c.index.(StateDecoder); ok {
+		if err := s.DecodeState(r); err != nil {
+			return errors.Wrap(err, "index state")
+		}
+	}
+	return nil
+}
+
+// EncodeState implements StateEncoder, ensuring state for index column.
+func (c ColLowCardinality[T]) EncodeState(b *Buffer) {
+	// Writing key serialization version.
+	b.PutInt64(int64(sharedDictionariesWithAdditionalKeys))
+	if s, ok := c.index.(StateEncoder); ok {
+		s.EncodeState(b)
+	}
 }
 
 func (c *ColLowCardinality[T]) DecodeColumn(r *Reader, rows int) error {
@@ -230,6 +230,41 @@ func (c *ColLowCardinality[T]) EncodeColumn(b *Buffer) {
 	}
 }
 
+func (c *ColLowCardinality[T]) WriteColumn(w *Writer) {
+	// Using pointer receiver as Prepare() is expected to be called before
+	// encoding.
+
+	if c.Rows() == 0 {
+		// Skipping encoding entirely.
+		return
+	}
+
+	w.ChainBuffer(func(b *Buffer) {
+		// Meta encodes whether reader should update
+		// low cardinality metadata and keys column type.
+		meta := cardinalityUpdateAll | int64(c.key)
+		b.PutInt64(meta)
+
+		// Writing index (dictionary).
+		b.PutInt64(int64(c.index.Rows()))
+	})
+	c.index.WriteColumn(w)
+
+	w.ChainBuffer(func(b *Buffer) {
+		b.PutInt64(int64(c.Rows()))
+	})
+	switch c.key {
+	case KeyUInt8:
+		c.keys8.WriteColumn(w)
+	case KeyUInt16:
+		c.keys16.WriteColumn(w)
+	case KeyUInt32:
+		c.keys32.WriteColumn(w)
+	case KeyUInt64:
+		c.keys64.WriteColumn(w)
+	}
+}
+
 func (c *ColLowCardinality[T]) Reset() {
 	for k := range c.kv {
 		delete(c.kv, k)
@@ -286,17 +321,6 @@ func (c ColLowCardinality[T]) Rows() int {
 
 // Prepare column for ingestion.
 func (c *ColLowCardinality[T]) Prepare() error {
-	// Select minimum possible size for key.
-	if n := len(c.Values); n < math.MaxUint8 {
-		c.key = KeyUInt8
-	} else if n < math.MaxUint16 {
-		c.key = KeyUInt16
-	} else if uint32(n) < math.MaxUint32 {
-		c.key = KeyUInt32
-	} else {
-		c.key = KeyUInt64
-	}
-
 	// Allocate keys slice.
 	c.keys = append(c.keys[:0], make([]int, len(c.Values))...)
 	if c.kv == nil {
@@ -315,6 +339,17 @@ func (c *ColLowCardinality[T]) Prepare() error {
 			last++
 		}
 		c.keys[i] = idx
+	}
+
+	// Select minimum possible size for key.
+	if n := last; n < math.MaxUint8 {
+		c.key = KeyUInt8
+	} else if n < math.MaxUint16 {
+		c.key = KeyUInt16
+	} else if uint32(n) < math.MaxUint32 {
+		c.key = KeyUInt32
+	} else {
+		c.key = KeyUInt64
 	}
 
 	// Fill key column with key indexes.

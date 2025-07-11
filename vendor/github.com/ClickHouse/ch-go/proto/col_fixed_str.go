@@ -66,6 +66,12 @@ func (c *ColFixedStr) Append(b []byte) {
 	c.Buf = append(c.Buf, b...)
 }
 
+func (c *ColFixedStr) AppendArr(vs [][]byte) {
+	for _, v := range vs {
+		c.Append(v)
+	}
+}
+
 // EncodeColumn encodes ColFixedStr rows to *Buffer.
 func (c ColFixedStr) EncodeColumn(b *Buffer) {
 	b.Buf = append(b.Buf, c.Buf...)
@@ -78,6 +84,11 @@ func (c *ColFixedStr) DecodeColumn(r *Reader, rows int) error {
 		return errors.Wrap(err, "read full")
 	}
 	return nil
+}
+
+// WriteColumn writes ColFixedStr rows to *Writer.
+func (c ColFixedStr) WriteColumn(w *Writer) {
+	w.ChainWrite(c.Buf)
 }
 
 // Array returns new Array(FixedString).

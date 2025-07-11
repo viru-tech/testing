@@ -61,11 +61,10 @@ func (c *ColDateTime64) Infer(t ColumnType) error {
 	if elem == "" {
 		return errors.Errorf("invalid DateTime64: no elements in %q", t)
 	}
-	elems := strings.SplitN(elem, ",", 2)
-	for i := range elems {
-		elems[i] = strings.Trim(elems[i], `' `)
-	}
-	n, err := strconv.ParseUint(elems[0], 10, 8)
+	pStr, locStr, hasloc := strings.Cut(elem, ",")
+	pStr = strings.Trim(pStr, `' `)
+	locStr = strings.Trim(locStr, `' `)
+	n, err := strconv.ParseUint(pStr, 10, 8)
 	if err != nil {
 		return errors.Wrap(err, "parse precision")
 	}
@@ -75,8 +74,8 @@ func (c *ColDateTime64) Infer(t ColumnType) error {
 	}
 	c.Precision = p
 	c.PrecisionSet = true
-	if len(elems) > 1 {
-		loc, err := time.LoadLocation(elems[1])
+	if hasloc {
+		loc, err := time.LoadLocation(locStr)
 		if err != nil {
 			return errors.Wrap(err, "invalid location")
 		}
@@ -111,9 +110,23 @@ func (c *ColDateTime64) Append(v time.Time) {
 	c.AppendRaw(ToDateTime64(v, c.Precision))
 }
 
+func (c *ColDateTime64) AppendArr(v []time.Time) {
+	if !c.PrecisionSet {
+		panic("DateTime64: no precision set")
+	}
+
+	for _, item := range v {
+		c.AppendRaw(ToDateTime64(item, c.Precision))
+	}
+}
+
 // Raw version of ColDateTime64 for ColumnOf[DateTime64].
 func (c ColDateTime64) Raw() *ColDateTime64Raw {
 	return &ColDateTime64Raw{ColDateTime64: c}
+}
+
+func (c *ColDateTime64) Nullable() *ColNullable[time.Time] {
+	return &ColNullable[time.Time]{Values: c}
 }
 
 func (c *ColDateTime64) Array() *ColArr[time.Time] {
@@ -132,4 +145,9 @@ type ColDateTime64Raw struct {
 }
 
 func (c *ColDateTime64Raw) Append(v DateTime64) { c.AppendRaw(v) }
+func (c *ColDateTime64Raw) AppendArr(vs []DateTime64) {
+	for _, v := range vs {
+		c.AppendRaw(v)
+	}
+}
 func (c ColDateTime64Raw) Row(i int) DateTime64 { return c.Data[i] }

@@ -1,4 +1,4 @@
-//go:build !(amd64 || arm64) || purego
+//go:build !(amd64 || arm64 || riscv64) || purego
 
 package proto
 
@@ -41,4 +41,12 @@ func (c *ColBool) DecodeColumn(r *Reader, rows int) error {
 	}
 	*c = v
 	return nil
+}
+
+// WriteColumn encodes ColBool rows to *Writer.
+func (c ColBool) WriteColumn(w *Writer) {
+	if len(c) == 0 {
+		return
+	}
+	w.ChainBuffer(c.EncodeColumn)
 }

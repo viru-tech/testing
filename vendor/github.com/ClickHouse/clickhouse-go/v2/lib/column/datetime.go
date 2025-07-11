@@ -19,11 +19,13 @@ package column
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
-	"github.com/ClickHouse/ch-go/proto"
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/ClickHouse/ch-go/proto"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/timezone"
 )
@@ -78,7 +80,7 @@ func (col *DateTime) Rows() int {
 	return col.col.Rows()
 }
 
-func (col *DateTime) Row(i int, ptr bool) interface{} {
+func (col *DateTime) Row(i int, ptr bool) any {
 	value := col.row(i)
 	if ptr {
 		return &value
@@ -86,13 +88,18 @@ func (col *DateTime) Row(i int, ptr bool) interface{} {
 	return value
 }
 
-func (col *DateTime) ScanRow(dest interface{}, row int) error {
+func (col *DateTime) ScanRow(dest any, row int) error {
 	switch d := dest.(type) {
 	case *time.Time:
 		*d = col.row(row)
 	case **time.Time:
 		*d = new(time.Time)
 		**d = col.row(row)
+	case *int64:
+		*d = col.row(row).Unix()
+	case **int64:
+		*d = new(int64)
+		**d = col.row(row).Unix()
 	case *sql.NullTime:
 		return d.Scan(col.row(row))
 	default:
@@ -108,7 +115,7 @@ func (col *DateTime) ScanRow(dest interface{}, row int) error {
 	return nil
 }
 
-func (col *DateTime) Append(v interface{}) (nulls []uint8, err error) {
+func (col *DateTime) Append(v any) (nulls []uint8, err error) {
 	switch v := v.(type) {
 	// we assume int64 is in seconds and don't currently scale to the precision
 	case []int64:
@@ -120,7 +127,7 @@ func (col *DateTime) Append(v interface{}) (nulls []uint8, err error) {
 		nulls = make([]uint8, len(v))
 		for i := range v {
 			switch {
-			case v != nil:
+			case v[i] != nil:
 				col.col.Append(time.Unix(*v[i], 0))
 			default:
 				col.col.Append(time.Time{})
@@ -130,9 +137,6 @@ func (col *DateTime) Append(v interface{}) (nulls []uint8, err error) {
 	case []time.Time:
 		nulls = make([]uint8, len(v))
 		for i := range v {
-			if err := dateOverflow(minDateTime, maxDateTime, v[i], defaultDateTimeFormatNoZone); err != nil {
-				return nil, err
-			}
 			col.col.Append(v[i])
 		}
 
@@ -141,9 +145,6 @@ func (col *DateTime) Append(v interface{}) (nulls []uint8, err error) {
 		for i := range v {
 			switch {
 			case v[i] != nil:
-				if err := dateOverflow(minDateTime, maxDateTime, *v[i], defaultDateTimeFormatNoZone); err != nil {
-					return nil, err
-				}
 				col.col.Append(*v[i])
 			default:
 				nulls[i] = 1
@@ -188,6 +189,18 @@ func (col *DateTime) Append(v interface{}) (nulls []uint8, err error) {
 			}
 		}
 	default:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return nil, &ColumnConverterError{
+					Op:   "Append",
+					To:   "DateTime",
+					From: fmt.Sprintf("%T", v),
+					Hint: "could not get driver.Valuer value",
+				}
+			}
+			return col.Append(val)
+		}
 		return nil, &ColumnConverterError{
 			Op:   "Append",
 			To:   "DateTime",
@@ -197,7 +210,7 @@ func (col *DateTime) Append(v interface{}) (nulls []uint8, err error) {
 	return
 }
 
-func (col *DateTime) AppendRow(v interface{}) error {
+func (col *DateTime) AppendRow(v any) error {
 	switch v := v.(type) {
 	// we assume int64 is in seconds and don't currently scale to the precision
 	case int64:
@@ -210,16 +223,10 @@ func (col *DateTime) AppendRow(v interface{}) error {
 			col.col.Append(time.Time{})
 		}
 	case time.Time:
-		if err := dateOverflow(minDateTime, maxDateTime, v, defaultDateTimeFormatNoZone); err != nil {
-			return err
-		}
 		col.col.Append(v)
 	case *time.Time:
 		switch {
 		case v != nil:
-			if err := dateOverflow(minDateTime, maxDateTime, *v, defaultDateTimeFormatNoZone); err != nil {
-				return err
-			}
 			col.col.Append(*v)
 		default:
 			col.col.Append(time.Time{})
@@ -257,6 +264,18 @@ func (col *DateTime) AppendRow(v interface{}) error {
 			col.col.Append(dateTime)
 		}
 	default:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return &ColumnConverterError{
+					Op:   "AppendRow",
+					To:   "DateTime",
+					From: fmt.Sprintf("%T", v),
+					Hint: "could not get driver.Valuer value",
+				}
+			}
+			return col.AppendRow(val)
+		}
 		s, ok := v.(fmt.Stringer)
 		if ok {
 			return col.AppendRow(s.String())
@@ -284,19 +303,11 @@ func (col *DateTime) row(i int) time.Time {
 }
 
 func (col *DateTime) parseDateTime(value string) (tv time.Time, err error) {
-	defer func() {
-		if err == nil {
-			err = dateOverflow(minDateTime, maxDateTime, tv, defaultDateFormatNoZone)
-		}
-	}()
-
 	if tv, err = time.Parse(defaultDateTimeFormatWithZone, value); err == nil {
 		return tv, nil
 	}
 	if tv, err = time.Parse(defaultDateTimeFormatNoZone, value); err == nil {
-		return time.Date(
-			tv.Year(), tv.Month(), tv.Day(), tv.Hour(), tv.Minute(), tv.Second(), tv.Nanosecond(), time.Local,
-		), nil
+		return getTimeWithDifferentLocation(tv, time.Local), nil
 	}
 	return time.Time{}, err
 }

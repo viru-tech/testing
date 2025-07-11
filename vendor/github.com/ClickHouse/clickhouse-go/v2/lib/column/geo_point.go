@@ -18,6 +18,7 @@
 package column
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"github.com/ClickHouse/ch-go/proto"
 	"reflect"
@@ -50,7 +51,7 @@ func (col *Point) Rows() int {
 	return col.col.Rows()
 }
 
-func (col *Point) Row(i int, ptr bool) interface{} {
+func (col *Point) Row(i int, ptr bool) any {
 	value := col.row(i)
 	if ptr {
 		return &value
@@ -58,7 +59,7 @@ func (col *Point) Row(i int, ptr bool) interface{} {
 	return value
 }
 
-func (col *Point) ScanRow(dest interface{}, row int) error {
+func (col *Point) ScanRow(dest any, row int) error {
 	switch d := dest.(type) {
 	case *orb.Point:
 		*d = col.row(row)
@@ -76,7 +77,7 @@ func (col *Point) ScanRow(dest interface{}, row int) error {
 	return nil
 }
 
-func (col *Point) Append(v interface{}) (nulls []uint8, err error) {
+func (col *Point) Append(v any) (nulls []uint8, err error) {
 	switch v := v.(type) {
 	case []orb.Point:
 		nulls = make([]uint8, len(v))
@@ -88,13 +89,30 @@ func (col *Point) Append(v interface{}) (nulls []uint8, err error) {
 		}
 	case []*orb.Point:
 		nulls = make([]uint8, len(v))
-		for _, v := range v {
-			col.col.Append(proto.Point{
-				X: v.Lon(),
-				Y: v.Lat(),
-			})
+		for i, v := range v {
+			if v == nil {
+				nulls[i] = 1
+				col.col.Append(proto.Point{})
+			} else {
+				col.col.Append(proto.Point{
+					X: v.Lon(),
+					Y: v.Lat(),
+				})
+			}
 		}
 	default:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return nil, &ColumnConverterError{
+					Op:   "Append",
+					To:   "Point",
+					From: fmt.Sprintf("%T", v),
+					Hint: fmt.Sprintf("could not get driver.Valuer value, try using %s", col.Type()),
+				}
+			}
+			return col.Append(val)
+		}
 		return nil, &ColumnConverterError{
 			Op:   "Append",
 			To:   "Point",
@@ -103,7 +121,7 @@ func (col *Point) Append(v interface{}) (nulls []uint8, err error) {
 	}
 	return
 }
-func (col *Point) AppendRow(v interface{}) error {
+func (col *Point) AppendRow(v any) error {
 	switch v := v.(type) {
 	case orb.Point:
 		col.col.Append(proto.Point{
@@ -116,6 +134,18 @@ func (col *Point) AppendRow(v interface{}) error {
 			Y: v.Lat(),
 		})
 	default:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return &ColumnConverterError{
+					Op:   "AppendRow",
+					To:   "Point",
+					From: fmt.Sprintf("%T", v),
+					Hint: fmt.Sprintf("could not get driver.Valuer value, try using %s", col.Type()),
+				}
+			}
+			return col.AppendRow(val)
+		}
 		return &ColumnConverterError{
 			Op:   "AppendRow",
 			To:   "Point",

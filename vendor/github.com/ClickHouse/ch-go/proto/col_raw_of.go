@@ -1,4 +1,4 @@
-//go:build (amd64 || arm64) && !purego
+//go:build (amd64 || arm64 || riscv64) && !purego
 
 package proto
 
@@ -81,4 +81,18 @@ func (c *ColRawOf[X]) DecodeColumn(r *Reader, rows int) error {
 		return errors.Wrap(err, "read full")
 	}
 	return nil
+}
+
+// WriteColumn write ColRawOf rows to *Writer.
+func (c ColRawOf[X]) WriteColumn(w *Writer) {
+	if len(c) == 0 {
+		return
+	}
+	var x X
+	size := unsafe.Sizeof(x)           // #nosec G103
+	s := *(*slice)(unsafe.Pointer(&c)) // #nosec G103
+	s.Len *= size
+	s.Cap *= size
+	src := *(*[]byte)(unsafe.Pointer(&s)) // #nosec G103
+	w.ChainWrite(src)
 }
