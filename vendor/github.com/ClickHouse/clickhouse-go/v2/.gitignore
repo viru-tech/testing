@@ -27,5 +27,16 @@ _testmain.go
 
 coverage.txt
 .idea/**
+.vscode/**
 dev/*
 .run/**
+
+vendor
+
+**.tfstate*
+.terraform.lock.hcl
+**/.terraform*
+pipeline.auto.tfvars
+*.tfvars
+
+.env

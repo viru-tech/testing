@@ -1,4 +1,4 @@
-//go:build (amd64 || arm64) && !purego
+//go:build (amd64 || arm64 || riscv64) && !purego
 
 package proto
 
@@ -46,4 +46,13 @@ func (c ColUUID) EncodeColumn(b *Buffer) {
 	dst := b.Buf[offset:]
 	copy(dst, src)
 	bswap.Swap64(dst) // BE <-> LE
+}
+
+// WriteColumn encodes ColUUID rows to *Writer.
+func (c ColUUID) WriteColumn(w *Writer) {
+	if len(c) == 0 {
+		return
+	}
+	// Can't write UUID as-is: bswap is required.
+	w.ChainBuffer(c.EncodeColumn)
 }

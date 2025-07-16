@@ -68,12 +68,31 @@ func (c *ColStr) Reset() {
 
 // EncodeColumn encodes String rows to *Buffer.
 func (c ColStr) EncodeColumn(b *Buffer) {
-	buf := make([]byte, binary.MaxVarintLen64)
+	var buf [binary.MaxVarintLen64]byte
 	for _, p := range c.Pos {
-		n := binary.PutUvarint(buf, uint64(p.End-p.Start))
+		length := uint64(p.End - p.Start)
+
+		// Encode to temp buffer first
+		n := binary.PutUvarint(buf[:], length)
+
+		// Append only the bytes we need
 		b.Buf = append(b.Buf, buf[:n]...)
 		b.Buf = append(b.Buf, c.Buf[p.Start:p.End]...)
 	}
+}
+
+// WriteColumn writes String rows to *Writer.
+func (c ColStr) WriteColumn(w *Writer) {
+	var buf [binary.MaxVarintLen64]byte
+	// Writing values from c.Buf directly might improve performance if [ColStr] contains a few rows of very long strings.
+	// However, most of the time it is quite opposite, so we copy data.
+	w.ChainBuffer(func(b *Buffer) {
+		for _, p := range c.Pos {
+			n := binary.PutUvarint(buf[:], uint64(p.End-p.Start))
+			b.PutRaw(buf[:n])
+			b.PutRaw(c.Buf[p.Start:p.End])
+		}
+	})
 }
 
 // ForEach calls f on each string from column.
@@ -113,6 +132,12 @@ func (c ColStr) ForEachBytes(f func(i int, b []byte) error) error {
 // DecodeColumn decodes String rows from *Reader.
 func (c *ColStr) DecodeColumn(r *Reader, rows int) error {
 	var p Position
+	size := len(c.Pos)
+	if cap(c.Pos) < size+rows {
+		c.Pos = append(c.Pos, make([]Position, size+rows-cap(c.Pos))...)
+	}
+	c.Pos = c.Pos[:0]
+	c.Buf = c.Buf[:cap(c.Buf)]
 	for i := 0; i < rows; i++ {
 		n, err := r.StrLen()
 		if err != nil {
@@ -122,12 +147,22 @@ func (c *ColStr) DecodeColumn(r *Reader, rows int) error {
 		p.Start = p.End
 		p.End += n
 
-		c.Buf = append(c.Buf, make([]byte, n)...)
+		if len(c.Buf) < p.End {
+			var an int
+			if n < 128 {
+				// small size, do batch buffer alloc
+				an = n * (rows - i)
+			} else {
+				an = n
+			}
+			c.Buf = append(c.Buf, make([]byte, an)...)
+		}
 		if err := r.ReadFull(c.Buf[p.Start:p.End]); err != nil {
 			return errors.Wrapf(err, "row %d: read full", i)
 		}
 		c.Pos = append(c.Pos, p)
 	}
+	c.Buf = c.Buf[:p.End]
 	return nil
 }
 

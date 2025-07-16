@@ -18,14 +18,17 @@
 package column
 
 import (
+	"database/sql"
+	"database/sql/driver"
 	"fmt"
-	"github.com/ClickHouse/ch-go/proto"
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"net"
 	"reflect"
 	"strings"
 	"time"
+
+	"github.com/ClickHouse/ch-go/proto"
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 type Tuple struct {
@@ -130,14 +133,17 @@ func (col *Tuple) Rows() int {
 	return 0
 }
 
-func (col *Tuple) Row(i int, ptr bool) interface{} {
+func (col *Tuple) Row(i int, ptr bool) any {
 	tuple := reflect.New(col.ScanType())
 	value := tuple.Interface()
 	if err := col.ScanRow(value, i); err != nil {
 		// if this happens we have an unexplained problem
 		return nil
 	}
-	return value
+	if ptr {
+		return value
+	}
+	return tuple.Elem().Interface()
 }
 
 func setJSONFieldValue(field reflect.Value, value reflect.Value) error {
@@ -194,16 +200,18 @@ func setJSONFieldValue(field reflect.Value, value reflect.Value) error {
 		}
 	}
 
-	// check if our target is a string
-	if field.Kind() == reflect.String {
-		if v := reflect.ValueOf(fmt.Sprint(value.Interface())); v.Type().AssignableTo(field.Type()) {
-			field.Set(v)
-			return nil
-		}
-	}
 	if value.CanConvert(field.Type()) {
 		field.Set(value.Convert(field.Type()))
 		return nil
+	}
+
+	// check if our target implements sql.Scanner
+	sqlScanner := reflect.TypeOf((*sql.Scanner)(nil)).Elem()
+	if fieldAddr := field.Addr(); field.Kind() != reflect.Ptr && fieldAddr.Type().Implements(sqlScanner) {
+		returns := fieldAddr.MethodByName("Scan").Call([]reflect.Value{value})
+		if len(returns) > 0 && returns[0].IsNil() {
+			return nil
+		}
 	}
 
 	return &ColumnConverterError{
@@ -262,8 +270,8 @@ func (col *Tuple) scanMap(targetMap reflect.Value, row int) error {
 				}
 				targetMap.SetMapIndex(reflect.ValueOf(colName), newMap)
 			case reflect.Interface:
-				// catches interface{} - Note this swallows custom interfaces to which maps couldn't conform
-				newMap := reflect.ValueOf(make(map[string]interface{}))
+				// catches any - Note this swallows custom interfaces to which maps couldn't conform
+				newMap := reflect.ValueOf(make(map[string]any))
 				if err := dCol.scanMap(newMap, row); err != nil {
 					return err
 				}
@@ -271,7 +279,7 @@ func (col *Tuple) scanMap(targetMap reflect.Value, row int) error {
 			default:
 				return &Error{
 					ColumnType: fmt.Sprint(targetMap.Type().Elem().Kind()),
-					Err:        fmt.Errorf("column %s - needs a map/struct or interface{}", col.Name()),
+					Err:        fmt.Errorf("column %s - needs a map/struct or any", col.Name()),
 				}
 			}
 		case *Nested:
@@ -280,7 +288,7 @@ func (col *Tuple) scanMap(targetMap reflect.Value, row int) error {
 			if err != nil {
 				return err
 			}
-			// this wont work if targetMap is a map[string][]interface{} and we try to set a typed slice
+			// this wont work if targetMap is a map[string][]any and we try to set a typed slice
 			targetMap.SetMapIndex(reflect.ValueOf(colName), subSlice)
 		case *Array:
 			subSlice, err := dCol.scan(targetMap.Type().Elem(), row)
@@ -332,8 +340,8 @@ func (col *Tuple) scanStruct(targetStruct reflect.Value, row int) error {
 				}
 				sField.Set(newMap)
 			case reflect.Interface:
-				// catches []interface{} -Note this swallows custom interfaces to which maps couldn't conform
-				newMap := reflect.ValueOf(make(map[string]interface{}))
+				// catches []any -Note this swallows custom interfaces to which maps couldn't conform
+				newMap := reflect.ValueOf(make(map[string]any))
 				if err := dCol.scanMap(newMap, row); err != nil {
 					return err
 				}
@@ -341,7 +349,7 @@ func (col *Tuple) scanStruct(targetStruct reflect.Value, row int) error {
 			default:
 				return &Error{
 					ColumnType: fmt.Sprint(sField.Kind()),
-					Err:        fmt.Errorf("column %s - needs a map/struct/slice or interface{}", col.Name()),
+					Err:        fmt.Errorf("column %s - needs a map/struct/slice or any", col.Name()),
 				}
 			}
 		case *Nested:
@@ -418,7 +426,7 @@ func (col *Tuple) scan(targetType reflect.Type, row int) (reflect.Value, error) 
 		if !col.isNamed {
 			return reflect.Value{}, &ColumnConverterError{
 				Op:   "ScanRow",
-				To:   fmt.Sprintf("%s", targetType),
+				To:   targetType.String(),
 				From: string(col.chType),
 				Hint: "cannot use maps for unnamed tuples, use slice",
 			}
@@ -432,11 +440,11 @@ func (col *Tuple) scan(targetType reflect.Type, row int) (reflect.Value, error) 
 		//tuples can be scanned into slices - specifically default for unnamed tuples
 		rSlice, err := col.scanSlice(targetType, row)
 		if err != nil {
-			return reflect.Value{}, nil
+			return reflect.Value{}, err
 		}
 		return rSlice, nil
 	case reflect.Interface:
-		// catches interface{} -Note this swallows custom interfaces to which maps couldn't conform
+		// catches any -Note this swallows custom interfaces to which maps couldn't conform
 		if !col.isNamed {
 			return reflect.Value{}, &ColumnConverterError{
 				Op:   "ScanRow",
@@ -445,7 +453,7 @@ func (col *Tuple) scan(targetType reflect.Type, row int) (reflect.Value, error) 
 				Hint: "cannot use interface for unnamed tuples, use slice",
 			}
 		}
-		rMap := reflect.ValueOf(make(map[string]interface{}))
+		rMap := reflect.ValueOf(make(map[string]any))
 		if err := col.scanMap(rMap, row); err != nil {
 			return reflect.Value{}, err
 		}
@@ -453,11 +461,11 @@ func (col *Tuple) scan(targetType reflect.Type, row int) (reflect.Value, error) 
 	}
 	return reflect.Value{}, &Error{
 		ColumnType: fmt.Sprint(targetType.Kind()),
-		Err:        fmt.Errorf("column %s - needs a map/struct/slice or interface{}", col.Name()),
+		Err:        fmt.Errorf("column %s - needs a map/struct/slice or any", col.Name()),
 	}
 }
 
-func (col *Tuple) ScanRow(dest interface{}, row int) error {
+func (col *Tuple) ScanRow(dest any, row int) error {
 	value := reflect.Indirect(reflect.ValueOf(dest))
 	tuple, err := col.scan(value.Type(), row)
 	if err != nil {
@@ -467,7 +475,7 @@ func (col *Tuple) ScanRow(dest interface{}, row int) error {
 	return nil
 }
 
-func (col *Tuple) Append(v interface{}) (nulls []uint8, err error) {
+func (col *Tuple) Append(v any) (nulls []uint8, err error) {
 	value := reflect.ValueOf(v)
 	if value.Kind() == reflect.Slice {
 		for i := 0; i < value.Len(); i++ {
@@ -477,6 +485,18 @@ func (col *Tuple) Append(v interface{}) (nulls []uint8, err error) {
 		}
 		return nil, nil
 	}
+	if valuer, ok := v.(driver.Valuer); ok {
+		val, err := valuer.Value()
+		if err != nil {
+			return nil, &ColumnConverterError{
+				Op:   "Append",
+				To:   string(col.chType),
+				From: fmt.Sprintf("%T", v),
+				Hint: "could not get driver.Valuer value",
+			}
+		}
+		return col.Append(val)
+	}
 	return nil, &ColumnConverterError{
 		Op:   "Append",
 		To:   string(col.chType),
@@ -484,13 +504,75 @@ func (col *Tuple) Append(v interface{}) (nulls []uint8, err error) {
 	}
 }
 
-func (col *Tuple) AppendRow(v interface{}) error {
-	// allows support of tuples where map or slice is typed and NOT interface{}. Will fail if tuple isn't consistent
+func (col *Tuple) AppendRow(v any) error {
+	// allows support of tuples where map or slice is typed and NOT any. Will fail if tuple isn't consistent
 	value := reflect.ValueOf(v)
 	if value.Kind() == reflect.Pointer {
 		value = value.Elem()
 	}
 	switch value.Kind() {
+	case reflect.Struct:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return &ColumnConverterError{
+					Op:   "AppendRow",
+					To:   string(col.chType),
+					From: fmt.Sprintf("%T", v),
+					Hint: "could not get driver.Valuer value",
+				}
+			}
+			return col.AppendRow(val)
+		}
+
+		if !col.isNamed {
+			return &Error{
+				ColumnType: string(col.chType),
+				Err:        fmt.Errorf("converting from %T is not supported for unnamed tuples - use a slice", v),
+			}
+		}
+
+		valueType := value.Type()
+		fieldNames := make(map[string]struct{}, value.NumField())
+		for i := 0; i < value.NumField(); i++ {
+			if !value.Field(i).CanInterface() {
+				// can't interface - likely not exported so ignore the field
+				continue
+			}
+			name, omit := getStructFieldName(valueType.Field(i))
+			if omit {
+				continue
+			}
+			fieldNames[name] = struct{}{}
+		}
+
+		if len(fieldNames) != len(col.columns) {
+			return &Error{
+				ColumnType: string(col.chType),
+				Err:        fmt.Errorf("invalid size. expected %d got %d", len(col.columns), len(fieldNames)),
+			}
+		}
+
+		for i := 0; i < value.NumField(); i++ {
+			if !value.Field(i).CanInterface() {
+				// can't interface - likely not exported so ignore the field
+				continue
+			}
+			name, omit := getStructFieldName(valueType.Field(i))
+			if omit {
+				continue
+			}
+			if _, ok := col.index[name]; !ok {
+				return &Error{
+					ColumnType: string(col.chType),
+					Err:        fmt.Errorf("sub column '%s' does not exist in %s", name, col.Name()),
+				}
+			}
+			if err := col.columns[col.index[name]].AppendRow(value.Field(i).Interface()); err != nil {
+				return err
+			}
+		}
+		return nil
 	case reflect.Map:
 		if !col.isNamed {
 			return &Error{
@@ -537,6 +619,19 @@ func (col *Tuple) AppendRow(v interface{}) error {
 			}
 		}
 		return nil
+	}
+
+	if valuer, ok := v.(driver.Valuer); ok {
+		val, err := valuer.Value()
+		if err != nil {
+			return &ColumnConverterError{
+				Op:   "AppendRow",
+				To:   string(col.chType),
+				From: fmt.Sprintf("%T", v),
+				Hint: "could not get driver.Valuer value",
+			}
+		}
+		return col.AppendRow(val)
 	}
 
 	return &ColumnConverterError{

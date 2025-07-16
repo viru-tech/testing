@@ -19,7 +19,9 @@ package column
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"encoding"
+	"encoding/json"
 	"fmt"
 	"github.com/ClickHouse/ch-go/proto"
 	"reflect"
@@ -52,7 +54,7 @@ func (col *String) Rows() int {
 	return col.col.Rows()
 }
 
-func (col *String) Row(i int, ptr bool) interface{} {
+func (col *String) Row(i int, ptr bool) any {
 	val := col.col.Row(i)
 	if ptr {
 		return &val
@@ -60,7 +62,7 @@ func (col *String) Row(i int, ptr bool) interface{} {
 	return val
 }
 
-func (col *String) ScanRow(dest interface{}, row int) error {
+func (col *String) ScanRow(dest any, row int) error {
 	val := col.Row(row, false).(string)
 	switch d := dest.(type) {
 	case *string:
@@ -70,6 +72,11 @@ func (col *String) ScanRow(dest interface{}, row int) error {
 		**d = val
 	case *sql.NullString:
 		return d.Scan(val)
+	case *json.RawMessage:
+		*d = json.RawMessage(val)
+	case **json.RawMessage:
+		*d = new(json.RawMessage)
+		**d = json.RawMessage(val)
 	case encoding.BinaryUnmarshaler:
 		return d.UnmarshalBinary(binary.Str2Bytes(val, len(val)))
 	default:
@@ -85,7 +92,7 @@ func (col *String) ScanRow(dest interface{}, row int) error {
 	return nil
 }
 
-func (col *String) AppendRow(v interface{}) error {
+func (col *String) AppendRow(v any) error {
 	switch v := v.(type) {
 	case string:
 		col.col.Append(v)
@@ -110,25 +117,42 @@ func (col *String) AppendRow(v interface{}) error {
 		default:
 			col.col.Append("")
 		}
+	case json.RawMessage:
+		col.col.AppendBytes(v)
+	case *json.RawMessage:
+		col.col.AppendBytes(*v)
 	case []byte:
-		col.col.Append(string(v))
+		col.col.AppendBytes(v)
 	case nil:
 		col.col.Append("")
 	default:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return &ColumnConverterError{
+					Op:   "AppendRow",
+					To:   "String",
+					From: fmt.Sprintf("%T", v),
+					Hint: "could not get driver.Valuer value",
+				}
+			}
+			return col.AppendRow(val)
+		}
+
 		if s, ok := v.(fmt.Stringer); ok {
 			return col.AppendRow(s.String())
-		} else {
-			return &ColumnConverterError{
-				Op:   "AppendRow",
-				To:   "String",
-				From: fmt.Sprintf("%T", v),
-			}
+		}
+
+		return &ColumnConverterError{
+			Op:   "AppendRow",
+			To:   "String",
+			From: fmt.Sprintf("%T", v),
 		}
 	}
 	return nil
 }
 
-func (col *String) Append(v interface{}) (nulls []uint8, err error) {
+func (col *String) Append(v any) (nulls []uint8, err error) {
 	switch v := v.(type) {
 	case []string:
 		col.col.AppendArr(v)
@@ -157,12 +181,35 @@ func (col *String) Append(v interface{}) (nulls []uint8, err error) {
 			}
 			col.AppendRow(v[i])
 		}
+	case []json.RawMessage:
+		nulls = make([]uint8, len(v))
+		for i := range v {
+			col.col.Append(string(v[i]))
+		}
+	case []*json.RawMessage:
+		nulls = make([]uint8, len(v))
+		for i := range v {
+			col.col.Append(string(*v[i]))
+		}
 	case [][]byte:
 		nulls = make([]uint8, len(v))
 		for i := range v {
 			col.col.Append(string(v[i]))
 		}
 	default:
+
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return nil, &ColumnConverterError{
+					Op:   "Append",
+					To:   "String",
+					From: fmt.Sprintf("%T", v),
+					Hint: "could not get driver.Valuer value",
+				}
+			}
+			return col.Append(val)
+		}
 		return nil, &ColumnConverterError{
 			Op:   "Append",
 			To:   "String",

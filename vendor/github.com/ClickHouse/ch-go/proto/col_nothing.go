@@ -15,8 +15,12 @@ type Nothing struct{}
 // https://clickhouse.com/docs/ru/sql-reference/data-types/special-data-types/nothing
 type ColNothing int
 
-func (c *ColNothing) Append(v Nothing) {
+func (c *ColNothing) Append(_ Nothing) {
 	*c++
+}
+
+func (c *ColNothing) AppendArr(vs []Nothing) {
+	*c = ColNothing(int(*c) + len(vs))
 }
 
 func (c ColNothing) Row(i int) Nothing {
@@ -66,4 +70,8 @@ func (c ColNothing) EncodeColumn(b *Buffer) {
 		return
 	}
 	b.PutRaw(make([]byte, c))
+}
+
+func (c ColNothing) WriteColumn(w *Writer) {
+	w.ChainBuffer(c.EncodeColumn)
 }

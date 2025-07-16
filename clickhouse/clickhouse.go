@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/docker/docker/api/types/container"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/clickhouse"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -44,6 +45,8 @@ type CHClusterConfig struct {
 	// ImportData will be imported into the cluster
 	// after migrations.
 	ImportData []CHData
+	// Env passes env variables to container.
+	Env map[string]string
 }
 
 // CHMigration is used to migrate CH.
@@ -73,7 +76,7 @@ func NewCHCluster(ctx context.Context, config *CHClusterConfig) (CHCluster, erro
 	)
 
 	binds := testcontainers.ContainerMounts{
-		testcontainers.BindMount(
+		testcontainers.BindMount( //nolint:staticcheck
 			config.CHConfigPath,
 			testcontainers.ContainerMountTarget(filepath.Join(chConfigBasePath, "config.xml")),
 		),
@@ -82,7 +85,7 @@ func NewCHCluster(ctx context.Context, config *CHClusterConfig) (CHCluster, erro
 	for _, path := range config.BindPaths {
 		binds = append(
 			binds,
-			testcontainers.BindMount(
+			testcontainers.BindMount( //nolint:staticcheck
 				path,
 				testcontainers.ContainerMountTarget(filepath.Join(chConfigBasePath, filepath.Base(path))),
 			),
@@ -95,7 +98,10 @@ func NewCHCluster(ctx context.Context, config *CHClusterConfig) (CHCluster, erro
 			ExposedPorts: []string{"9000", "8123"},
 			Mounts:       binds,
 			WaitingFor:   wait.ForListeningPort("9000"),
-			Hostname:     "clickhouse",
+			ConfigModifier: func(config *container.Config) {
+				config.Hostname = "clickhouse"
+			},
+			Env: config.Env,
 		},
 		Started:      true,
 		ProviderType: testcontainers.ProviderDocker,
@@ -144,7 +150,7 @@ func (c CHCluster) applyMigrations(ctx context.Context, migration CHMigration) e
 	cmd := exec.CommandContext(ctx, //nolint:gosec
 		"docker", "exec", "-i", c.ch.GetContainerID(),
 		"clickhouse", "client",
-		"--query", fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", migration.DBName))
+		"--query", "CREATE DATABASE IF NOT EXISTS "+migration.DBName)
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to run %q: %w", cmd.Args, err)
@@ -161,7 +167,7 @@ func (c CHCluster) applyMigrations(ctx context.Context, migration CHMigration) e
 	}
 
 	m, err := migrate.New(
-		fmt.Sprintf("file://%s", migrations),
+		"file://"+migrations,
 		c.DSN(migration.DBName)+"?x-multi-statement=true",
 	)
 	if err != nil {
@@ -189,7 +195,7 @@ func (c CHCluster) fill(ctx context.Context, data []CHData) error {
 		if err != nil {
 			return fmt.Errorf("failed to open %s: %w", tsvPath, err)
 		}
-		defer tsv.Close() //nolint:errcheck,gosec
+		defer tsv.Close() //nolint:errcheck
 
 		cmd := exec.CommandContext(ctx, //nolint:gosec
 			"docker", "exec", "-i", c.ch.GetContainerID(),
@@ -237,7 +243,7 @@ func cpMigrations(from, to string, replacements map[string]string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create %s: %w", to, err)
 		}
-		defer tgtFile.Close() //nolint:errcheck,gosec
+		defer tgtFile.Close() //nolint:errcheck
 
 		if _, err := r.WriteString(tgtFile, string(src)); err != nil {
 			return fmt.Errorf("failed to write %s: %w", from, err)

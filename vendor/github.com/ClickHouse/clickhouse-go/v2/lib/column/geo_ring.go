@@ -18,6 +18,7 @@
 package column
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"github.com/ClickHouse/ch-go/proto"
 	"reflect"
@@ -50,7 +51,7 @@ func (col *Ring) Rows() int {
 	return col.set.Rows()
 }
 
-func (col *Ring) Row(i int, ptr bool) interface{} {
+func (col *Ring) Row(i int, ptr bool) any {
 	value := col.row(i)
 	if ptr {
 		return &value
@@ -58,7 +59,7 @@ func (col *Ring) Row(i int, ptr bool) interface{} {
 	return value
 }
 
-func (col *Ring) ScanRow(dest interface{}, row int) error {
+func (col *Ring) ScanRow(dest any, row int) error {
 	switch d := dest.(type) {
 	case *orb.Ring:
 		*d = col.row(row)
@@ -76,7 +77,7 @@ func (col *Ring) ScanRow(dest interface{}, row int) error {
 	return nil
 }
 
-func (col *Ring) Append(v interface{}) (nulls []uint8, err error) {
+func (col *Ring) Append(v any) (nulls []uint8, err error) {
 	switch v := v.(type) {
 	case []orb.Ring:
 		values := make([][]orb.Point, 0, len(v))
@@ -85,12 +86,30 @@ func (col *Ring) Append(v interface{}) (nulls []uint8, err error) {
 		}
 		return col.set.Append(values)
 	case []*orb.Ring:
+		nulls = make([]uint8, len(v))
 		values := make([][]orb.Point, 0, len(v))
-		for _, v := range v {
-			values = append(values, *v)
+		for i, v := range v {
+			if v == nil {
+				nulls[i] = 1
+				values = append(values, orb.Ring{})
+			} else {
+				values = append(values, *v)
+			}
 		}
 		return col.set.Append(values)
 	default:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return nil, &ColumnConverterError{
+					Op:   "Append",
+					To:   "Ring",
+					From: fmt.Sprintf("%T", v),
+					Hint: fmt.Sprintf("could not get driver.Valuer value, try using %s", col.Type()),
+				}
+			}
+			return col.Append(val)
+		}
 		return nil, &ColumnConverterError{
 			Op:   "Append",
 			To:   "Ring",
@@ -99,13 +118,25 @@ func (col *Ring) Append(v interface{}) (nulls []uint8, err error) {
 	}
 }
 
-func (col *Ring) AppendRow(v interface{}) error {
+func (col *Ring) AppendRow(v any) error {
 	switch v := v.(type) {
 	case orb.Ring:
 		return col.set.AppendRow([]orb.Point(v))
 	case *orb.Ring:
 		return col.set.AppendRow([]orb.Point(*v))
 	default:
+		if valuer, ok := v.(driver.Valuer); ok {
+			val, err := valuer.Value()
+			if err != nil {
+				return &ColumnConverterError{
+					Op:   "AppendRow",
+					To:   "Ring",
+					From: fmt.Sprintf("%T", v),
+					Hint: fmt.Sprintf("could not get driver.Valuer value, try using %s", col.Type()),
+				}
+			}
+			return col.AppendRow(val)
+		}
 		return &ColumnConverterError{
 			Op:   "AppendRow",
 			To:   "Ring",
