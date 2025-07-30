@@ -105,10 +105,6 @@ linters:
       - linters:
           - lll
         source: '^//( )?go:generate '
-      - linters:
-          - gochecknoglobals
-          - gochecknoinits
-        path: internal/metrics/.*
       - path: (.+)\.go$
         text: ST1000
     paths:
@@ -129,7 +125,6 @@ formatters:
       sections:
         - standard
         - default
-        - prefix(gitlab.lucky-team.pro)
     gofmt:
       simplify: true
   exclusions:
