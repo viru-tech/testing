@@ -29,6 +29,11 @@ type CHCluster struct {
 	chEndpoint string
 }
 
+type FileBind struct {
+	Source string
+	Dest   string
+}
+
 // CHClusterConfig is used to setup CH cluster for testing.
 type CHClusterConfig struct {
 	// Clickhouse image version, e.g. "22.9.2.7".
@@ -36,9 +41,10 @@ type CHClusterConfig struct {
 	// Path on host to the test configuration. Will
 	// be mounted as /etc/clickhouse-server/config.xml.
 	CHConfigPath string
+	Networks     []string
 	// BindPaths contain optional paths to extra files
 	// that will be mounted under /etc/clickhouse-server.
-	BindPaths []string
+	BindPaths []FileBind
 	// Migrations contains migrations that will be
 	// applied to the CH contains.
 	Migrations []CHMigration
@@ -83,11 +89,16 @@ func NewCHCluster(ctx context.Context, config *CHClusterConfig) (CHCluster, erro
 	}
 
 	for _, path := range config.BindPaths {
+		source := path.Source
+		dest := path.Dest
+		if dest == "" {
+			dest = filepath.Join(chConfigBasePath, filepath.Base(source))
+		}
 		binds = append(
 			binds,
 			testcontainers.BindMount( //nolint:staticcheck
-				path,
-				testcontainers.ContainerMountTarget(filepath.Join(chConfigBasePath, filepath.Base(path))),
+				source,
+				testcontainers.ContainerMountTarget(dest),
 			),
 		)
 	}
@@ -101,7 +112,8 @@ func NewCHCluster(ctx context.Context, config *CHClusterConfig) (CHCluster, erro
 			ConfigModifier: func(config *container.Config) {
 				config.Hostname = "clickhouse"
 			},
-			Env: config.Env,
+			Networks: config.Networks,
+			Env:      config.Env,
 		},
 		Started:      true,
 		ProviderType: testcontainers.ProviderDocker,
