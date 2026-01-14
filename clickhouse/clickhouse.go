@@ -29,6 +29,7 @@ type CHCluster struct {
 	chEndpoint string
 }
 
+// FileBind is used to set up file bindings.
 type FileBind struct {
 	Source string
 	Dest   string
@@ -88,9 +89,9 @@ func NewCHCluster(ctx context.Context, config *CHClusterConfig) (CHCluster, erro
 		),
 	}
 
-	for _, path := range config.BindPaths {
-		source := path.Source
-		dest := path.Dest
+	for i := range config.BindPaths {
+		source := config.BindPaths[i].Source
+		dest := config.BindPaths[i].Dest
 		if dest == "" {
 			dest = filepath.Join(chConfigBasePath, filepath.Base(source))
 		}
