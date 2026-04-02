@@ -212,15 +212,6 @@ func (c CHCluster) fill(ctx context.Context, data []CHData) error {
 
 		cmd := exec.CommandContext(ctx, //nolint:gosec
 			"docker", "exec", "-i", c.ch.GetContainerID(),
-			"clickhouse", "client", "--database", dbName,
-			"--query", "SYSTEM STOP MERGES")
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to run %q: %w", cmd.Args, err)
-		}
-
-		cmd = exec.CommandContext(ctx, //nolint:gosec
-			"docker", "exec", "-i", c.ch.GetContainerID(),
 			"clickhouse", "client", "--multiquery", "--multiline", "--database", dbName,
 			"--query", fmt.Sprintf("INSERT INTO %s FORMAT TSVWithNames", table))
 		cmd.Stdin = tsv
@@ -229,6 +220,15 @@ func (c CHCluster) fill(ctx context.Context, data []CHData) error {
 			return fmt.Errorf("failed to run %q: %w", cmd.Args, err)
 		}
 		return nil
+	}
+
+	cmd := exec.CommandContext(ctx, //nolint:gosec
+		"docker", "exec", "-i", c.ch.GetContainerID(),
+		"clickhouse", "client",
+		"--query", "SYSTEM STOP TTL MERGES")
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to run %q: %w", cmd.Args, err)
 	}
 
 	for i := range data {
