@@ -69,6 +69,7 @@ type CHData struct {
 	SourceTSV   string
 	DBName      string
 	TargetTable string
+	DisableTTL  bool
 }
 
 // NewCHCluster brings up test CH cluster that can be used in integration tests.
@@ -199,7 +200,7 @@ func (c CHCluster) applyMigrations(ctx context.Context, migration CHMigration) e
 }
 
 func (c CHCluster) fill(ctx context.Context, data []CHData) error {
-	importTSV := func(tsvPath, dbName, table string) error {
+	importTSV := func(tsvPath, dbName, table string, disableTTL bool) error {
 		if tsvPath == "" {
 			return nil
 		}
@@ -209,6 +210,17 @@ func (c CHCluster) fill(ctx context.Context, data []CHData) error {
 			return fmt.Errorf("failed to open %s: %w", tsvPath, err)
 		}
 		defer tsv.Close() //nolint:errcheck
+
+		if disableTTL {
+			cmd := exec.CommandContext(ctx, //nolint:gosec
+				"docker", "exec", "-i", c.ch.GetContainerID(),
+				"clickhouse", "client",
+				"--query", fmt.Sprintf("SYSTEM STOP TTL MERGES %s.%s", dbName, table))
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("failed to run %q: %w", cmd.Args, err)
+			}
+		}
 
 		cmd := exec.CommandContext(ctx, //nolint:gosec
 			"docker", "exec", "-i", c.ch.GetContainerID(),
@@ -223,7 +235,7 @@ func (c CHCluster) fill(ctx context.Context, data []CHData) error {
 	}
 
 	for i := range data {
-		if err := importTSV(data[i].SourceTSV, data[i].DBName, data[i].TargetTable); err != nil {
+		if err := importTSV(data[i].SourceTSV, data[i].DBName, data[i].TargetTable, data[i].DisableTTL); err != nil {
 			return fmt.Errorf("failed to import %s into %s: %w", data[i].SourceTSV, data[i].TargetTable, err)
 		}
 	}
@@ -261,6 +273,7 @@ func cpMigrations(from, to string, replacements map[string]string) error {
 		if _, err := r.WriteString(tgtFile, string(src)); err != nil {
 			return fmt.Errorf("failed to write %s: %w", from, err)
 		}
+
 		return nil
 	}
 
